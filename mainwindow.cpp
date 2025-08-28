@@ -473,7 +473,6 @@ void MainWindow::onDecryptButtonClicked()
         return;
     }
 
-    // 解密密钥从 UI 读取（示例）
     QString keyHex = ui->lineEditDecryptKey->text().trimmed();
     if (!validateDecryptionKey(keyHex)) {
         QMessageBox::warning(this, tr("密钥错误"), tr("请提供有效的解密密钥（十六进制）"));
@@ -481,11 +480,20 @@ void MainWindow::onDecryptButtonClicked()
     }
     QByteArray key = QByteArray::fromHex(keyHex.toUtf8());
 
+    // 先读取扩展名
+    QString ext;
+    this->decryptFile(m_currentDecryptFilePath, QString(), key, [](int){}, &ext);
+
     QString defaultOut = QDir::homePath() + "/" + QFileInfo(m_currentDecryptFilePath).completeBaseName();
+    if (!ext.isEmpty()) defaultOut += "." + ext;
     QString savePath = QFileDialog::getSaveFileName(this, tr("保存解密文件"), defaultOut, tr("All Files (*)"));
     if (savePath.isEmpty()) return;
 
-    // 显示 overlay 并禁用页面
+    // 若用户未指定扩展名，自动补全
+    if (!ext.isEmpty() && !savePath.endsWith("." + ext, Qt::CaseInsensitive)) {
+        savePath += "." + ext;
+    }
+
     m_cancelRequested.storeRelaxed(false);
     m_progressBar->setValue(0);
     m_progressLabel->setText("0%");
@@ -503,11 +511,10 @@ void MainWindow::onDecryptButtonClicked()
         }, Qt::QueuedConnection);
     };
 
+    m_decryptedFilePath = savePath; // 新增
     auto future = QtConcurrent::run([this, savePath, key, progressCb]() -> bool {
-        bool ok = this->decryptFile(this->m_currentDecryptFilePath, savePath, key, progressCb);
-        return ok;
+        return this->decryptFile(this->m_currentDecryptFilePath, savePath, key, progressCb, nullptr);
     });
-
     m_workerWatcherDecrypt->setFuture(future);
 }
 
@@ -520,8 +527,21 @@ void MainWindow::onDecryptionFinished()
     setWidgetInteractiveRecursive(pageWidget, true, m_progressOverlay);
 
     if (success) {
+        QFileInfo originalFileInfo(m_currentDecryptFilePath);
+        QString keyHex = ui->lineEditDecryptKey->text().trimmed();
+        QString outputPath = m_decryptedFilePath;
+        QFileInfo decryptedFileInfo(outputPath);
+        logOperation("解密", m_currentDecryptFilePath, outputPath,
+                     originalFileInfo.size(), decryptedFileInfo.size(), keyHex);
+
         QMessageBox::information(this, tr("解密成功"), tr("文件解密成功"));
-        // 不跳回上一页
+
+        // 新增：切换回解密初始页面（假设索引为0）
+        ui->stackedWidgetDecrypt->setCurrentIndex(0);
+        // 可选：清空相关输入框和状态
+        m_currentDecryptFilePath.clear();
+        updateDecryptFileInfoDisplay();
+        ui->lineEditDecryptKey->clear();
     } else {
         if (m_cancelRequested.loadRelaxed()) {
             QMessageBox::information(this, tr("已取消"), tr("解密已取消"));
@@ -545,10 +565,21 @@ bool MainWindow::encryptFile(const QString &inputPath, const QString &outputPath
         return false;
     }
 
-    qint64 totalSize = in.size();
-    qint64 processed = 0;
-    const int BUF_SZ = 64 * 1024;
+    // 新增：写入扩展名
+    QFileInfo fi(inputPath);
+    QString ext = fi.suffix();
+    QByteArray extBytes = ext.toUtf8();
+    quint8 extLen = qMin(extBytes.size(), 32); // 最多32字节
+
+    // 写头
+    out.write(magic);
+    out.putChar((char)VERSION);
+    out.write(iv);
+    out.putChar((char)extLen); // 新增
+    if (extLen > 0) out.write(extBytes.constData(), extLen); // 新增
+
     QByteArray inBuf;
+    const int BUF_SZ = 64 * 1024;
     inBuf.resize(BUF_SZ);
 
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
@@ -573,14 +604,11 @@ bool MainWindow::encryptFile(const QString &inputPath, const QString &outputPath
         return false;
     }
 
-    // 写头
-    out.write(magic);
-    out.putChar((char)VERSION);
-    out.write(iv);
-
     QByteArray outBuf;
     outBuf.resize(BUF_SZ + EVP_CIPHER_block_size(EVP_aes_128_gcm()));
     int outLen = 0;
+    qint64 totalSize = in.size();
+    qint64 processed = 0;
 
     while (!in.atEnd()) {
         if (m_cancelRequested.loadRelaxed()) { // 取消处理
@@ -633,7 +661,7 @@ bool MainWindow::encryptFile(const QString &inputPath, const QString &outputPath
 
 // 解密函数：解析头并解密，校验 tag
 bool MainWindow::decryptFile(const QString &inputPath, const QString &outputPath, const QByteArray &key,
-                             const std::function<void(int)> &progressCallback)
+                             const std::function<void(int)> &progressCallback, QString *outExt)
 {
     QFile in(inputPath);
     if (!in.open(QIODevice::ReadOnly)) return false;
@@ -646,6 +674,18 @@ bool MainWindow::decryptFile(const QString &inputPath, const QString &outputPath
 
     QByteArray iv = in.read(12);
     if (iv.size() != 12) { in.close(); return false; }
+
+    // 新增：读取扩展名长度和内容
+    char extLenChar = 0;
+    if (in.read(&extLenChar, 1) != 1) { in.close(); return false; }
+    int extLen = (unsigned char)extLenChar;
+    QByteArray extBytes;
+    if (extLen > 0) {
+        extBytes = in.read(extLen);
+        if (extBytes.size() != extLen) { in.close(); return false; }
+    }
+    QString ext = QString::fromUtf8(extBytes);
+    if (outExt) *outExt = ext;
 
     // 剩下文件大小 = ciphertext + tag(16)
     qint64 totalRemaining = in.size() - in.pos();
@@ -803,29 +843,26 @@ void MainWindow::saveLogsToFile()
 // 刷新日志列表（支持过滤） — 调整后根据文本计算每项高度，避免被截断
 void MainWindow::refreshLogList(const QString &filter)
 {
-    if (!ui->listWidgetLogs) return;
     ui->listWidgetLogs->clear();
 
-    const int viewportWidth = qMax(100, ui->listWidgetLogs->viewport()->width() - 8); // 留些内边距
-    QFontMetrics fm(ui->listWidgetLogs->font());
+    // 按时间降序排序（通过日志字符串的时间字段）
+    std::sort(m_logEntries.begin(), m_logEntries.end(), [](const QString &a, const QString &b) {
+        // 提取时间字符串（假设格式为 [yyyy-MM-dd hh:mm:ss] ...）
+        QRegularExpression re(R"(\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\])");
+        QRegularExpressionMatch ma = re.match(a);
+        QRegularExpressionMatch mb = re.match(b);
+        QDateTime ta = ma.hasMatch() ? QDateTime::fromString(ma.captured(1), "yyyy-MM-dd hh:mm:ss") : QDateTime();
+        QDateTime tb = mb.hasMatch() ? QDateTime::fromString(mb.captured(1), "yyyy-MM-dd hh:mm:ss") : QDateTime();
+        return ta > tb;
+    });
 
-    for (int i = 0; i < m_logEntries.size(); ++i) {
-        const QString &entry = m_logEntries.at(i);
-        if (filter.isEmpty() || entry.contains(filter, Qt::CaseInsensitive)) {
-            QListWidgetItem *it = new QListWidgetItem(entry);
-            it->setData(Qt::UserRole, i); // 保存原始索引，便于删除
-
-            // 计算多行包裹时所需高度
-            QRect br = fm.boundingRect(0, 0, viewportWidth, 10000,
-                                      Qt::TextWordWrap, entry);
-            QSize hint = br.size();
-            // 增加一些垂直与水平间距
-            hint.rwidth() += 8;
-            hint.rheight() += 8;
-            it->setSizeHint(hint);
-
-            ui->listWidgetLogs->addItem(it);
-        }
+    int idx = 0;
+    for (const auto &entry : m_logEntries) {
+        if (!filter.isEmpty() && !entry.contains(filter, Qt::CaseInsensitive))
+            continue;
+        QListWidgetItem *item = new QListWidgetItem(entry, ui->listWidgetLogs);
+        item->setData(Qt::UserRole, idx); // 记录原始索引，便于删除
+        ++idx;
     }
     // 若当前为空并且有 filter，可能需要显示提示
     if (ui->listWidgetLogs->count() == 0 && !filter.isEmpty()) {

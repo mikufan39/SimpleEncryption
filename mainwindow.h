@@ -70,6 +70,7 @@ private:
     // 解密相关成员
     QString m_currentDecryptFilePath; // 当前选择的解密文件路径
     QString m_originalFileExtension; // 存储原始文件扩展名
+    QString m_decryptedFilePath; // 新增：用于记录最近一次解密输出路径
 
     // 新增：进度/取消 UI 与后台 watcher
     QWidget *m_progressOverlay = nullptr;
@@ -87,7 +88,7 @@ private:
 
     // 解密函数（增加进度回调）
     bool decryptFile(const QString &inputPath, const QString &outputPath, const QByteArray &key,
-                     const std::function<void(int)> &progressCallback);
+                     const std::function<void(int)> &progressCallback, QString *outExt = nullptr);
 
     // 校验解密密钥格式（十六进制、长度32）
     bool validateDecryptionKey(const QString &keyHex);
