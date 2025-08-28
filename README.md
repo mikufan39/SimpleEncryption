@@ -10,8 +10,6 @@ SimpleEncryption 是一个基于 Qt 和 OpenSSL 的跨平台文件加密/解密�
 
 - 支持文件加密与解密，采用 AES-128-GCM 算法
 - 自动生成安全密钥，密钥需妥善保存
-- 支持大文件（最大 1GB）
-- 进度条与取消操作
 - 文件哈希校验（SHA256）
 - 操作日志记录
 - 跨平台（Windows、Linux、macOS）
@@ -51,8 +49,6 @@ SimpleEncryption is a cross-platform file encryption/decryption tool based on Qt
 
 - File encryption and decryption with AES-128-GCM
 - Secure random key generation (keep your key safe!)
-- Supports large files (up to 1GB)
-- Progress bar and cancel support
 - File hash verification (SHA256)
 - Operation log
 - Cross-platform (Windows, Linux, macOS)
