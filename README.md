@@ -1,7 +1,5 @@
 # SimpleEncryption
 
-[English below | English version below]
-
 ## 简介
 
 SimpleEncryption 是一个基于 Qt 和 OpenSSL 的跨平台文件加密/解密工具，支持 AES-128-GCM 算法，界面简洁，操作简单。适合个人用户对敏感文件进行本地加密保护。
